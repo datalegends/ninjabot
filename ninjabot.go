@@ -171,9 +171,11 @@ func (n *NinjaBot) Summary() {
 }
 
 func (n *NinjaBot) Run(ctx context.Context) error {
+	scs := []*strategy.Controller{}
 	for _, pair := range n.settings.Pairs {
 		// setup and subscribe strategy to data feed (candles)
 		strategyController := strategy.NewStrategyController(pair, n.settings, n.strategy, n.orderController)
+		scs = append(scs, strategyController)
 		n.dataFeed.Subscribe(pair, n.strategy.Timeframe(), strategyController.OnCandle, true)
 
 		// preload candles to warmup strategy
@@ -189,5 +191,9 @@ func (n *NinjaBot) Run(ctx context.Context) error {
 	n.orderController.Start()
 	defer n.orderController.Stop()
 	n.dataFeed.Start()
+	// finish up stratiegies
+	for _, strategyController := range scs {
+		strategyController.Finish()
+	}
 	return nil
 }
