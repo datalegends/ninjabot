@@ -38,6 +38,7 @@ type Broker interface {
 	OrderLimit(side model.SideType, symbol string, size float64, limit float64) (model.Order, error)
 	OrderMarket(side model.SideType, symbol string, size float64) (model.Order, error)
 	Cancel(model.Order) error
+	Orders() []model.Order
 }
 
 type DataFeed struct {

@@ -82,10 +82,13 @@ type Controller struct {
 	Results        map[string]*summary
 	tickerInterval time.Duration
 	finish         chan bool
+	NoDB           bool
 }
 
 func NewController(ctx context.Context, exchange exchange.Exchange, storage *ent.Client,
-	orderFeed *Feed, notifier notification.Notifier) *Controller {
+	orderFeed *Feed, notifier notification.Notifier,
+	noDB bool,
+) *Controller {
 
 	return &Controller{
 		ctx:            ctx,
@@ -96,10 +99,51 @@ func NewController(ctx context.Context, exchange exchange.Exchange, storage *ent
 		Results:        make(map[string]*summary),
 		tickerInterval: time.Second,
 		finish:         make(chan bool),
+		NoDB:           noDB,
 	}
 }
 
+// calculateProfitNoDB calculate profit of each trade using
+// paperwallet in memory order collection
+func (c *Controller) calculateProfitNoDB(o *model.Order) (value, percent, volume float64, err error) {
+
+	quantity := 0.0
+	avgPrice := 0.0
+	tradeVolume := 0.0
+
+	for _, order := range c.exchange.Orders() {
+		if order.Side == model.SideTypeBuy {
+			price := order.Price
+			if order.Type == model.OrderTypeStopLoss || order.Type == model.OrderTypeStopLossLimit {
+				price = *order.Stop
+			}
+			avgPrice = (order.Quantity*price + avgPrice*quantity) / (order.Quantity + quantity)
+			quantity += order.Quantity
+		} else {
+			quantity = math.Max(quantity-order.Quantity, 0)
+		}
+
+		// We keep track of volume to have an indication of costs. (0.001%) binance.
+		tradeVolume += order.Quantity * order.Price
+	}
+
+	cost := o.Quantity * avgPrice
+	price := o.Price
+	if o.Type == model.OrderTypeStopLoss || o.Type == model.OrderTypeStopLossLimit {
+		price = *o.Stop
+	}
+	profitValue := o.Quantity*price - cost
+	return profitValue, profitValue / cost, tradeVolume, nil
+
+}
+
 func (c *Controller) calculateProfit(o *model.Order) (value, percent, volume float64, err error) {
+
+	if c.NoDB {
+		// paperwallet no database simulations
+		return c.calculateProfitNoDB(o)
+	}
+
 	orders, err := c.storage.Order.Query().Where(
 		order.UpdatedAtLTE(o.UpdatedAt),
 		order.Status(string(model.OrderStatusTypeFilled)),
@@ -245,6 +289,11 @@ func (c *Controller) Start() {
 }
 
 func (c *Controller) createOrder(order *model.Order) error {
+
+	if c.NoDB {
+		return nil
+	}
+
 	register, err := c.storage.Order.Create().
 		SetExchangeID(order.ExchangeID).
 		SetCreatedAt(order.CreatedAt).
@@ -277,8 +326,13 @@ func (c *Controller) Order(symbol string, id int64) (model.Order, error) {
 	return c.exchange.Order(symbol, id)
 }
 
+func (c *Controller) Orders() []model.Order {
+	return c.exchange.Orders()
+}
+
 func (c *Controller) OrderOCO(side model.SideType, symbol string, size, price, stop,
 	stopLimit float64) ([]model.Order, error) {
+
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 

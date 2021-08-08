@@ -36,6 +36,10 @@ type PaperWallet struct {
 
 type PaperWalletOption func(*PaperWallet)
 
+func (p PaperWallet) Orders() []model.Order {
+	return p.orders
+}
+
 func WithPaperAsset(symbol string, amount float64) PaperWalletOption {
 	return func(wallet *PaperWallet) {
 		wallet.assets[symbol] = &assetInfo{

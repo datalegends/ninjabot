@@ -44,15 +44,24 @@ type NinjaBot struct {
 	strategy strategy.Strategy
 	notifier notification.Notifier
 
+	StrategyControllers []*strategy.Controller
+
 	orderController *order.Controller
 	orderFeed       *order.Feed
 	dataFeed        *exchange.DataFeedSubscription
+
+	noDB bool
 }
 
 type Option func(*NinjaBot)
 
-func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange, str strategy.Strategy,
-	options ...Option) (*NinjaBot, error) {
+func NewBot(
+	ctx context.Context,
+	settings model.Settings,
+	exch exchange.Exchange,
+	str strategy.Strategy,
+	options ...Option,
+) (*NinjaBot, error) {
 
 	bot := &NinjaBot{
 		settings:  settings,
@@ -60,6 +69,7 @@ func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange
 		strategy:  str,
 		orderFeed: order.NewOrderFeed(),
 		dataFeed:  exchange.NewDataFeed(exch),
+		noDB:      false,
 	}
 
 	for _, option := range options {
@@ -75,7 +85,11 @@ func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange
 	}
 
 	if bot.orderController == nil {
-		bot.orderController = order.NewController(ctx, exch, bot.storage, bot.orderFeed, bot.notifier)
+		bot.orderController = order.NewController(
+			ctx, exch, bot.storage,
+			bot.orderFeed, bot.notifier,
+			bot.noDB,
+		)
 	}
 
 	return bot, nil
@@ -84,6 +98,12 @@ func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange
 func WithStorage(storage *ent.Client) Option {
 	return func(bot *NinjaBot) {
 		bot.storage = storage
+	}
+}
+
+func WithNoDB() Option {
+	return func(bot *NinjaBot) {
+		bot.noDB = true
 	}
 }
 
@@ -171,11 +191,11 @@ func (n *NinjaBot) Summary() {
 }
 
 func (n *NinjaBot) Run(ctx context.Context) error {
-	scs := []*strategy.Controller{}
+	n.StrategyControllers = []*strategy.Controller{}
 	for _, pair := range n.settings.Pairs {
 		// setup and subscribe strategy to data feed (candles)
 		strategyController := strategy.NewStrategyController(pair, n.settings, n.strategy, n.orderController)
-		scs = append(scs, strategyController)
+		n.StrategyControllers = append(n.StrategyControllers, strategyController)
 		n.dataFeed.Subscribe(pair, n.strategy.Timeframe(), strategyController.OnCandle, true)
 
 		// preload candles to warmup strategy
@@ -188,11 +208,13 @@ func (n *NinjaBot) Run(ctx context.Context) error {
 	}
 
 	n.orderFeed.Start()
+
 	n.orderController.Start()
 	defer n.orderController.Stop()
+
 	n.dataFeed.Start()
 	// finish up stratiegies
-	for _, strategyController := range scs {
+	for _, strategyController := range n.StrategyControllers {
 		strategyController.Finish()
 	}
 	return nil
