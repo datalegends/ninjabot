@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Ninja Bot - Trade Results</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  </head>
+  <script defer src="/assets/chart.js"></script>
+  <style>
+    html {
+      box-sizing: border-box;
+      font-size: 16px;
+    }
+
+    *, *:before, *:after {
+      box-sizing: inherit;
+    }
+
+    body, h1, h2, h3, h4, h5, h6, p, ol, ul {
+      margin: 0;
+      padding: 0;
+      font-weight: normal;
+      font-family: sans-serif;
+    }
+
+    ol, ul {
+      display: inline-block;
+      list-style: none;
+    }
+
+    .menu {
+      margin: 10px;
+    }
+
+    .coin {
+      display: inline-block;
+      background: #ccc;
+      padding: 10px;
+      border-radius: 5px;
+      color: #000;
+      text-decoration: none;
+      font-family: sans-serif;
+    }
+
+    .coin.active {
+      background: rgb(106, 141, 204);
+    }
+
+    .coin:hover {
+      background: rgb(106, 141, 204);
+    }
+
+    #graph {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      top: 50px;
+    }
+
+    ul li {
+      display: inline-block;
+      list-style-type: none;
+      padding-right: 20px;
+      float: left;
+    }
+  </style>
+  <body>
+    <nav class="menu">
+      <ul>
+        {{range $val := .pairs}}
+        <li><a class="coin {{if eq $.pair $val}}active{{end}}" href="/?pair={{ $val }}">{{ $val }}</a></li>
+        {{end}}
+      </ul>
+    </nav>
+    <div id="graph"></div>
+  </body>
+</html>

@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"os"
+	"strconv"
 
 	"github.com/rodrigo-brito/ninjabot"
 	"github.com/rodrigo-brito/ninjabot/examples/strategies"
-	"github.com/rodrigo-brito/ninjabot/pkg/exchange"
-	"github.com/rodrigo-brito/ninjabot/pkg/model"
-	"github.com/rodrigo-brito/ninjabot/pkg/notification"
-	"github.com/rodrigo-brito/ninjabot/pkg/storage"
+	"github.com/rodrigo-brito/ninjabot/exchange"
+	"github.com/rodrigo-brito/ninjabot/storage"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -17,17 +16,21 @@ import (
 func main() {
 	var (
 		ctx             = context.Background()
-		telegramKey     = os.Getenv("TELEGRAM_KEY")
-		telegramID      = os.Getenv("TELEGRAM_ID")
-		telegramChannel = os.Getenv("TELEGRAM_CHANNEL")
+		telegramToken   = os.Getenv("TELEGRAM_TOKEN")
+		telegramUser, _ = strconv.Atoi(os.Getenv("TELEGRAM_USER"))
 	)
 
-	settings := model.Settings{
+	settings := ninjabot.Settings{
 		Pairs: []string{
 			"BTCUSDT",
 			"ETHUSDT",
 			"BNBUSDT",
 			"LTCUSDT",
+		},
+		Telegram: ninjabot.TelegramSettings{
+			Enabled: true,
+			Token:   telegramToken,
+			Users:   []int{telegramUser},
 		},
 	}
 
@@ -37,12 +40,13 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// creating a storage to save trades
 	storage, err := storage.FromFile("backtest.db")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	notifier := notification.NewTelegram(telegramID, telegramKey, telegramChannel)
+	// creating a paper wallet to simulate an exchange waller for fake operataions
 	paperWallet := exchange.NewPaperWallet(
 		ctx,
 		"USDT",
@@ -51,15 +55,17 @@ func main() {
 		exchange.WithDataFeed(binance),
 	)
 
+	// initializing my strategy
 	strategy := new(strategies.CrossEMA)
+
+	// initializer ninjabot
 	bot, err := ninjabot.NewBot(
 		ctx,
 		settings,
 		paperWallet,
 		strategy,
 		ninjabot.WithStorage(storage),
-		ninjabot.WithNotifier(notifier),
-		ninjabot.WithCandleSubscription(paperWallet),
+		ninjabot.WithPaperWallet(paperWallet),
 	)
 	if err != nil {
 		log.Fatalln(err)

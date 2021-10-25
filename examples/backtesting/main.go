@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/rodrigo-brito/ninjabot"
 	"github.com/rodrigo-brito/ninjabot/examples/strategies"
-	"github.com/rodrigo-brito/ninjabot/pkg/exchange"
-	"github.com/rodrigo-brito/ninjabot/pkg/model"
-	"github.com/rodrigo-brito/ninjabot/pkg/plot"
-	"github.com/rodrigo-brito/ninjabot/pkg/storage"
+	"github.com/rodrigo-brito/ninjabot/exchange"
+	"github.com/rodrigo-brito/ninjabot/plot"
+	"github.com/rodrigo-brito/ninjabot/plot/indicator"
+	"github.com/rodrigo-brito/ninjabot/storage"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -16,7 +17,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	settings := model.Settings{
+	settings := ninjabot.Settings{
 		Pairs: []string{
 			"BTCUSDT",
 			"ETHUSDT",
@@ -54,15 +55,23 @@ func main() {
 		exchange.WithDataFeed(csvFeed),
 	)
 
-	chart := plot.NewChart()
+	chart, err := plot.NewChart(plot.WithIndicators(
+		indicator.EMA(8, "red"),
+		indicator.EMA(21, "#000"),
+		indicator.RSI(14, "purple"),
+		indicator.Stoch(8, 3, "red", "blue"),
+	))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	bot, err := ninjabot.NewBot(
 		ctx,
 		settings,
 		wallet,
 		strategy,
+		ninjabot.WithBacktest(wallet),
 		ninjabot.WithStorage(storage),
-		ninjabot.WithCandleSubscription(wallet),
 		ninjabot.WithCandleSubscription(chart),
 		ninjabot.WithOrderSubscription(chart),
 		ninjabot.WithLogLevel(log.WarnLevel),
@@ -77,7 +86,7 @@ func main() {
 	}
 
 	// Print bot results
-	bot.Summary()
+	fmt.Println(bot.Summary())
 	wallet.Summary()
 	err = chart.Start()
 	if err != nil {

@@ -1,26 +1,28 @@
 package ninjabot
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"strconv"
+	"sync"
+
+	"github.com/rodrigo-brito/ninjabot/exchange"
+	"github.com/rodrigo-brito/ninjabot/model"
+	"github.com/rodrigo-brito/ninjabot/notification"
+	"github.com/rodrigo-brito/ninjabot/order"
+	"github.com/rodrigo-brito/ninjabot/service"
+	"github.com/rodrigo-brito/ninjabot/storage"
+	"github.com/rodrigo-brito/ninjabot/strategy"
 
 	"github.com/olekukonko/tablewriter"
-
-	"github.com/rodrigo-brito/ninjabot/pkg/notification"
-
-	"github.com/rodrigo-brito/ninjabot/pkg/ent"
-	"github.com/rodrigo-brito/ninjabot/pkg/exchange"
-	"github.com/rodrigo-brito/ninjabot/pkg/model"
-	"github.com/rodrigo-brito/ninjabot/pkg/order"
-	"github.com/rodrigo-brito/ninjabot/pkg/storage"
-	"github.com/rodrigo-brito/ninjabot/pkg/strategy"
-
 	log "github.com/sirupsen/logrus"
 )
 
-const defaultDatabase = "ninjabot.db"
+const (
+	defaultDatabase  = "ninjabot.db"
+	candleBufferSize = 1e10
+)
 
 func init() {
 	log.SetFormatter(&log.TextFormatter{
@@ -38,28 +40,39 @@ type CandleSubscriber interface {
 }
 
 type NinjaBot struct {
-	storage  *ent.Client
+	storage  storage.Storage
 	settings model.Settings
-	exchange exchange.Exchange
+	exchange service.Exchange
 	strategy strategy.Strategy
-	notifier notification.Notifier
+	notifier service.Notifier
+	telegram service.Telegram
 
-	orderController *order.Controller
-	orderFeed       *order.Feed
-	dataFeed        *exchange.DataFeedSubscription
+	orderController       *order.Controller
+	priorityQueueCandle   *model.PriorityQueue
+	strategiesControllers map[string]*strategy.Controller
+	orderFeed             *order.Feed
+	dataFeed              *exchange.DataFeedSubscription
+	paperWallet           *exchange.PaperWallet
+
+	backtest       bool
+	pendingCandles chan bool
+	startBacktest  sync.WaitGroup
 }
 
 type Option func(*NinjaBot)
 
-func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange, str strategy.Strategy,
+func NewBot(ctx context.Context, settings model.Settings, exch service.Exchange, str strategy.Strategy,
 	options ...Option) (*NinjaBot, error) {
 
 	bot := &NinjaBot{
-		settings:  settings,
-		exchange:  exch,
-		strategy:  str,
-		orderFeed: order.NewOrderFeed(),
-		dataFeed:  exchange.NewDataFeed(exch),
+		settings:              settings,
+		exchange:              exch,
+		strategy:              str,
+		orderFeed:             order.NewOrderFeed(),
+		dataFeed:              exchange.NewDataFeed(exch),
+		strategiesControllers: make(map[string]*strategy.Controller),
+		priorityQueueCandle:   model.NewPriorityQueue(nil),
+		pendingCandles:        make(chan bool, candleBufferSize),
 	}
 
 	for _, option := range options {
@@ -78,10 +91,30 @@ func NewBot(ctx context.Context, settings model.Settings, exch exchange.Exchange
 		bot.orderController = order.NewController(ctx, exch, bot.storage, bot.orderFeed, bot.notifier)
 	}
 
+	if settings.Telegram.Enabled {
+		bot.telegram, err = notification.NewTelegram(bot.orderController, settings)
+		if err != nil {
+			return nil, err
+		}
+		// register telegram as notifier
+		WithNotifier(bot.telegram)(bot)
+	}
+
 	return bot, nil
 }
 
-func WithStorage(storage *ent.Client) Option {
+func WithBacktest(wallet *exchange.PaperWallet) Option {
+	return func(bot *NinjaBot) {
+		bot.backtest = true
+		bot.startBacktest.Add(1)
+
+		// load paper wallet
+		opt := WithPaperWallet(wallet)
+		opt(bot)
+	}
+}
+
+func WithStorage(storage storage.Storage) Option {
 	return func(bot *NinjaBot) {
 		bot.storage = storage
 	}
@@ -93,7 +126,7 @@ func WithLogLevel(level log.Level) Option {
 	}
 }
 
-func WithNotifier(notifier notification.Notifier) Option {
+func WithNotifier(notifier service.Notifier) Option {
 	return func(bot *NinjaBot) {
 		bot.notifier = notifier
 		bot.SubscribeOrder(notifier)
@@ -106,10 +139,16 @@ func WithCandleSubscription(subscriber CandleSubscriber) Option {
 	}
 }
 
+func WithPaperWallet(wallet *exchange.PaperWallet) Option {
+	return func(bot *NinjaBot) {
+		bot.paperWallet = wallet
+	}
+}
+
 func (n *NinjaBot) SubscribeCandle(subscriptions ...CandleSubscriber) {
-	for _, symbol := range n.settings.Pairs {
+	for _, pair := range n.settings.Pairs {
 		for _, subscription := range subscriptions {
-			n.dataFeed.Subscribe(symbol, n.strategy.Timeframe(), subscription.OnCandle, false)
+			n.dataFeed.Subscribe(pair, n.strategy.Timeframe(), subscription.OnCandle, false)
 		}
 	}
 }
@@ -121,28 +160,35 @@ func WithOrderSubscription(subscriber OrderSubscriber) Option {
 }
 
 func (n *NinjaBot) SubscribeOrder(subscriptions ...OrderSubscriber) {
-	for _, symbol := range n.settings.Pairs {
+	for _, pair := range n.settings.Pairs {
 		for _, subscription := range subscriptions {
-			n.orderFeed.Subscribe(symbol, subscription.OnOrder, false)
+			n.orderFeed.Subscribe(pair, subscription.OnOrder, false)
 		}
 	}
 }
 
-func (n *NinjaBot) Summary() {
+func (n *NinjaBot) Controller() *order.Controller {
+	return n.orderController
+}
+
+func (n *NinjaBot) Summary() string {
 	var (
 		total  float64
 		wins   int
 		loses  int
 		volume float64
 	)
-	table := tablewriter.NewWriter(os.Stdout)
+
+	buffer := bytes.NewBuffer(nil)
+	table := tablewriter.NewWriter(buffer)
 	table.SetHeader([]string{"Pair", "Trades", "Win", "Loss", "% Win", "Payoff", "Profit", "Volume"})
 	table.SetFooterAlignment(tablewriter.ALIGN_RIGHT)
 	avgPayoff := 0.0
+
 	for _, summary := range n.orderController.Results {
 		avgPayoff += summary.Payoff() * float64(len(summary.Win)+len(summary.Lose))
 		table.Append([]string{
-			summary.Symbol,
+			summary.Pair,
 			strconv.Itoa(len(summary.Win) + len(summary.Lose)),
 			strconv.Itoa(len(summary.Win)),
 			strconv.Itoa(len(summary.Lose)),
@@ -168,26 +214,69 @@ func (n *NinjaBot) Summary() {
 		fmt.Sprintf("%.2f", volume),
 	})
 	table.Render()
+
+	return buffer.String()
+}
+
+func (n *NinjaBot) onCandle(candle model.Candle) {
+	n.priorityQueueCandle.Push(candle)
+	n.pendingCandles <- true
+}
+
+func (n *NinjaBot) processCandles() {
+	// when backtesting, we need to wait all candles load
+	// to avoid sync issues between multiple coins
+	if n.backtest {
+		n.startBacktest.Wait()
+	}
+
+	for <-n.pendingCandles {
+		item := n.priorityQueueCandle.Pop()
+
+		candle := item.(model.Candle)
+		if n.paperWallet != nil {
+			n.paperWallet.OnCandle(candle)
+		}
+		n.strategiesControllers[candle.Pair].OnCandle(candle)
+	}
 }
 
 func (n *NinjaBot) Run(ctx context.Context) error {
 	for _, pair := range n.settings.Pairs {
+		pair := pair
 		// setup and subscribe strategy to data feed (candles)
-		strategyController := strategy.NewStrategyController(pair, n.settings, n.strategy, n.orderController)
-		n.dataFeed.Subscribe(pair, n.strategy.Timeframe(), strategyController.OnCandle, true)
-
-		// preload candles to warmup strategy
-		candles, err := n.exchange.CandlesByLimit(ctx, pair, n.strategy.Timeframe(), n.strategy.WarmupPeriod()+1)
-		if err != nil {
-			return err
-		}
-		n.dataFeed.Preload(pair, n.strategy.Timeframe(), candles)
+		strategyController := strategy.NewStrategyController(pair, n.strategy, n.orderController)
 		strategyController.Start()
+		n.strategiesControllers[pair] = strategyController
+
+		// link to ninja bot controller
+		// TODO: include onCandleClose=false to improve precision in OCO orders (backtesting)
+		n.dataFeed.Subscribe(pair, n.strategy.Timeframe(), n.onCandle, true)
+
+		if !n.backtest {
+			// preload candles to warmup strategy
+			candles, err := n.exchange.CandlesByLimit(ctx, pair, n.strategy.Timeframe(), n.strategy.WarmupPeriod()+1)
+			if err != nil {
+				return err
+			}
+			n.dataFeed.Preload(pair, n.strategy.Timeframe(), candles)
+		}
 	}
 
 	n.orderFeed.Start()
 	n.orderController.Start()
 	defer n.orderController.Stop()
-	n.dataFeed.Start()
+	if n.telegram != nil {
+		n.telegram.Start()
+	}
+
+	n.dataFeed.OnFinish(func() {
+		close(n.pendingCandles)
+		if n.backtest {
+			n.startBacktest.Done()
+		}
+	})
+	go n.dataFeed.Start()
+	n.processCandles()
 	return nil
 }
